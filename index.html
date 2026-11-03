@@ -22,6 +22,7 @@
 </section>
 <section class="panel"><div class="heading"><strong>Canlı harita</strong><span class="pill" id="count">0 aktif acil araç</span></div><div id="map"></div><div class="actions"><button id="soundToggle" class="secondary">🔇 Sesli uyarıyı aç</button></div><div id="alerts" class="status">Konum bekleniyor.</div></section>
 <section class="panel"><strong>Aktif acil araçlar</strong><div id="vehicles" class="muted" style="margin-top:12px">Henüz araç görünmüyor.</div></section>
+<section class="panel"><div class="status warn">Yön değerlendirmesi deneysel: GPS doğrultusu aynı yolu veya şeridi kanıtlamaz. Özellikle paralel yollarda yanlış sonuç verebilir. Kırmızı ışıkta geçme talimatı değildir.</div></section>
 <section class="panel"><strong>GPS test bilgileri</strong><pre class="debug" id="debug">Henüz bağlantı yok.</pre></section>
 </main>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -68,7 +69,23 @@ function distanceMeters(a,b){
  return Number.isFinite(meters)?meters:null;
 }
 function bearing(a,b){if(!valid(a)||!valid(b))return null;const y=Math.sin(radians(b.lng-a.lng))*Math.cos(radians(b.lat));const x=Math.cos(radians(a.lat))*Math.sin(radians(b.lat))-Math.sin(radians(a.lat))*Math.cos(radians(b.lat))*Math.cos(radians(b.lng-a.lng));return (Math.atan2(y,x)*180/Math.PI+360)%360;}
-let heading=null;
+let heading=null, emergencyHeading=null, driverHeadingAt=0, emergencyHeadingAt=0;
+const headingMinMove=12;
+function angularDiff(a,b){return Math.abs((a-b+540)%360-180);}
+// Yaklaşık doğrusal yol koridoru: kesin yol/şerit eşleştirmesi DEĞİLDİR.
+function behindEstimate(driver,vehicle){
+ if(!valid(driver)||!valid(vehicle)||!Number.isFinite(heading)||!Number.isFinite(vehicle.heading))return null;
+ if(!gpsFresh()||!isFresh(vehicle))return null;
+ const meters=distanceMeters(driver,vehicle);
+ if(!Number.isFinite(meters)||meters>500||meters<20)return null;
+ const angle=bearing(driver,vehicle);
+ const diff=angularDiff(angle,(heading+180)%360);
+ const crossTrack=meters*Math.sin(radians(diff));
+ const alongTrack=meters*Math.cos(radians(diff));
+ const sameDirection=angularDiff(heading,vehicle.heading)<=40;
+ // 25 m'lik yaklaşık koridor: paralel yolları ayırt edemez.
+ return {candidate:sameDirection&&alongTrack>0&&Math.abs(crossTrack)<=25, crossTrack, alongTrack, sameDirection};
+}
 function direction(a,b){const target=bearing(a,b);if(!Number.isFinite(heading)||!Number.isFinite(target))return 'Yön bilinmiyor';const diff=(target-heading+360)%360;return diff<45||diff>=315?'Önde':diff<135?'Sağda':diff<225?'Arkada':'Solda';}
 function timeOf(v){return typeof v?.updatedAt==='number'&&Number.isFinite(v.updatedAt)?v.updatedAt:null;}
 function isFresh(v){const t=timeOf(v);return t!==null&&Date.now()-t<ACTIVE_MS&&t<Date.now()+15000;}
@@ -82,11 +99,11 @@ function markerIcon(emoji,opacity=1){return L.divIcon({html:`<span style="font-s
 function upsertMarker(id,p,emoji,opacity,label){let marker=markers.get(id);if(marker){marker.setLatLng([p.lat,p.lng]);marker.setIcon(markerIcon(emoji,opacity));}else{marker=L.marker([p.lat,p.lng],{icon:markerIcon(emoji,opacity)}).addTo(map);markers.set(id,marker);}marker.bindPopup(label);}
 function clearMarker(id){const marker=markers.get(id);if(marker){map.removeLayer(marker);markers.delete(id);}}
 function updateDebug(others){
- const lines=[`Mod: ${mode==='driver'?'Sürücü':'Acil araç'}`,`GPS: ${valid(position)?'geçerli':'bekleniyor'}`,`GPS yaşı: ${lastGpsAt?Math.round((Date.now()-lastGpsAt)/1000)+' saniye':'bilinmiyor'}`,`GPS doğruluğu: ${Number.isFinite(accuracy)?Math.round(accuracy)+' m':'bilinmiyor'}`,`Firebase araç sayısı: ${Object.keys(records).length}`];
+ const lines=[`Mod: ${mode==='driver'?'Sürücü':'Acil araç'}`,`GPS: ${valid(position)?'geçerli':'bekleniyor'}`,`GPS yaşı: ${lastGpsAt?Math.round((Date.now()-lastGpsAt)/1000)+' saniye':'bilinmiyor'}`,`GPS doğruluğu: ${Number.isFinite(accuracy)?Math.round(accuracy)+' m':'bilinmiyor'}`,`Firebase araç sayısı: ${Object.keys(records).length}`,`Sürücü son yönü: ${Number.isFinite(heading)?Math.round(heading)+'°':'bilinmiyor'}`];
  if(lastError)lines.push('Son hata: '+lastError);
  if(mode==='driver'){
   if(!others.length)lines.push('Ambulans/polis/itfaiye kaydı yok');
-  for(const x of others){lines.push(`${names[x.data.type]||'Acil araç'}: koordinat ${valid(x.data)?'geçerli':'geçersiz'}; ${x.live?'güncel':'eski'}; mesafe ${Number.isFinite(x.meters)?Math.round(x.meters)+' m':'HESAPLANAMADI'}`);}
+  for(const x of others){lines.push(`${names[x.data.type]||'Acil araç'}: koordinat ${valid(x.data)?'geçerli':'geçersiz'}; ${x.live?'güncel':'eski'}; mesafe ${Number.isFinite(x.meters)?Math.round(x.meters)+' m':'HESAPLANAMADI'}; araç yönü ${Number.isFinite(x.data.heading)?Math.round(x.data.heading)+'°':'bilinmiyor'}; arka koridor ${x.behind?.candidate?'OLASI':'doğrulanmadı'}`);}
  }else lines.push('Acil araç konumu sürücülere yayınlanıyor.');
  $('debug').textContent=lines.join('\n');
 }
@@ -99,11 +116,11 @@ function render(){
  for(const id of markers.keys())if(!keep.has(id))clearMarker(id);
  if(mode==='driver'&&valid(position))upsertMarker('__driver',position,icons.driver,1,'Siz (sürücü)');
  for(const [id,v] of all)upsertMarker(id,v,icons[v.type],isFresh(v)?1:.35,(names[v.type]||'Acil araç')+(isFresh(v)?'':' · Eski konum'));
- const others=all.filter(([id])=>id!==uid).map(([id,data])=>({id,data,live:isFresh(data),meters:valid(position)?distanceMeters(position,data):null})).sort((a,b)=>Number(b.live)-Number(a.live)||(a.meters??Infinity)-(b.meters??Infinity));
+ const others=all.filter(([id])=>id!==uid).map(([id,data])=>({id,data,live:isFresh(data),meters:valid(position)?distanceMeters(position,data):null,behind:mode==='driver'?behindEstimate(position,data):null})).sort((a,b)=>Number(b.live)-Number(a.live)||(a.meters??Infinity)-(b.meters??Infinity));
  $('vehicles').replaceChildren();
  if(mode==='emergency'){$('vehicles').textContent='Acil araç modunda kendi aracınız listelenmez.';}
  else if(!others.length){$('vehicles').textContent='Aktif acil araç henüz görünmüyor.';}
- else for(const x of others){const row=document.createElement('div');row.className='vehicle';const left=document.createElement('span');left.textContent=icons[x.data.type]+' '+names[x.data.type]+(x.live?'':' · Son konum (güncel değil)');const right=document.createElement('span');right.textContent=!x.live?'Canlı konum yok':!gpsFresh()?'Sürücü GPS bekleniyor':!Number.isFinite(x.meters)?'Mesafe hesaplanamadı':`${Math.round(x.meters)} m · ${direction(position,x.data)}`;row.append(left,right);$('vehicles').append(row);}
+ else for(const x of others){const row=document.createElement('div');row.className='vehicle';const left=document.createElement('span');left.textContent=icons[x.data.type]+' '+names[x.data.type]+(x.live?'':' · Son konum (güncel değil)');const right=document.createElement('span');right.textContent=!x.live?'Canlı konum yok':!gpsFresh()?'Sürücü GPS bekleniyor':!Number.isFinite(x.meters)?'Mesafe hesaplanamadı':`${Math.round(x.meters)} m · ${x.behind?.candidate?'Olası arka koridor':direction(position,x.data)}`;row.append(left,right);$('vehicles').append(row);}
  const alert=$('alerts');
  if(mode==='emergency'){alert.className='status good';alert.textContent='Acil araç konumunuz paylaşılıyor. Yakınlık uyarıları sürücü ekranında gösterilir.';updateSound(0);}
  else if(!gpsFresh()){alert.className='status warn';alert.textContent='Sürücü GPS konumu bekleniyor veya güncel değil.';updateSound(0);}
@@ -111,7 +128,15 @@ function render(){
   const nearby=others.filter(x=>x.live&&Number.isFinite(x.meters)&&x.meters<=500).sort((a,b)=>a.meters-b.meters);
   const closest=nearby[0];const level=!closest?0:closest.meters<=100?3:closest.meters<=200?2:1;
   updateSound(level);
-  if(closest){alert.className=level>=2?'status danger':'status warn';alert.textContent=`${level===3?'🚨 KRİTİK YAKINLIK! ':level===2?'⚠️ DİKKAT! ':'⚠️ '}${names[closest.data.type]} yaklaşık ${Math.round(closest.meters)} metre uzaklıkta. ${direction(position,closest.data)}.`;}
+  if(closest){
+    const behind=nearby.find(x=>x.behind?.candidate);
+    const target=behind||closest;
+    const targetLevel=target.meters<=100?3:target.meters<=250?2:1;
+    alert.className=targetLevel>=2?'status danger':'status warn';
+    alert.textContent=behind
+     ?`🚨 ${names[target.data.type]} yaklaşık ${Math.round(target.meters)} metre gerinizde olabilir (aynı yol henüz doğrulanmadı). Güvenli şekilde yol vermeye hazırlanın.`
+     :`${level===3?'🚨 KRİTİK YAKINLIK! ':level===2?'⚠️ DİKKAT! ':'⚠️ '}${names[closest.data.type]} yaklaşık ${Math.round(closest.meters)} metre uzaklıkta. ${direction(position,closest.data)}.`;
+   }
   else if(others.some(x=>x.live&&!Number.isFinite(x.meters))){alert.className='status warn';alert.textContent='Acil araç görüldü ancak mesafe hesaplanamadı.';}
   else if(others.some(x=>!x.live)){alert.className='status warn';alert.textContent='Bazı araçların yalnızca eski konumu mevcut. Canlı yakınlık uyarısı verilmez.';}
   else{alert.className='status good';alert.textContent='500 metre içinde aktif acil araç görünmüyor.';}
@@ -121,7 +146,7 @@ function render(){
 async function publish(){
  if(!started||mode!=='emergency'||!myRef||!gpsFresh()||writing)return;
  writing=true;
- try{await set(myRef,{type:vehicleType,lat:position.lat,lng:position.lng,updatedAt:serverTimestamp()});lastPublishedAt=Date.now();}
+ try{await set(myRef,{type:vehicleType,lat:position.lat,lng:position.lng,heading:Number.isFinite(emergencyHeading)?emergencyHeading:null,updatedAt:serverTimestamp()});lastPublishedAt=Date.now();}
  catch(err){lastError='Firebase yazma: '+err.message;setStatus(lastError,'danger');}
  finally{writing=false;}
 }
@@ -129,7 +154,17 @@ function gpsSuccess(p){
  const next={lat:p.coords.latitude,lng:p.coords.longitude};
  if(!valid(next)){lastError='GPS geçersiz koordinat üretti';setStatus(lastError,'danger');return;}
  const moved=valid(position)?distanceMeters(position,next):null;
- if(mode==='driver'&&Number.isFinite(moved)&&moved>Math.max(8,Number.isFinite(p.coords.accuracy)?p.coords.accuracy:0))heading=bearing(position,next);
+ if(Number.isFinite(moved)&&moved>Math.max(headingMinMove,Number.isFinite(p.coords.accuracy)?p.coords.accuracy:0)){
+   const newHeading=bearing(position,next);
+   if(mode==='driver'){heading=newHeading;driverHeadingAt=Date.now();}
+   else {emergencyHeading=newHeading;emergencyHeadingAt=Date.now();}
+  }
+  // GPS hareket yönü varsa, duraklama öncesindeki yönü koruyarak kullan.
+  const gpsHeading=p.coords.heading;
+  if(Number.isFinite(gpsHeading)&&p.coords.speed!==null&&p.coords.speed>=2){
+   if(mode==='driver'){heading=gpsHeading;driverHeadingAt=Date.now();}
+   else{emergencyHeading=gpsHeading;emergencyHeadingAt=Date.now();}
+  }
  position=next;lastGpsAt=Date.now();accuracy=p.coords.accuracy;lastError='';
  setStatus('GPS etkin · doğruluk yaklaşık '+(Number.isFinite(accuracy)?Math.round(accuracy)+' m':'bilinmiyor'),'good');
  if(firstFix){map.setView([next.lat,next.lng],16);firstFix=false;setTimeout(()=>map.invalidateSize(),100);}
@@ -170,7 +205,7 @@ async function stop(){
  if(watchId!==null){navigator.geolocation.clearWatch(watchId);watchId=null;}
  if(unsubscribe){unsubscribe();unsubscribe=null;}
  if(myRef){try{await remove(myRef);await onDisconnect(myRef).cancel();}catch(err){lastError='Kayıt silme: '+err.message;}myRef=null;}
- position=null;lastGpsAt=0;accuracy=null;records={};heading=null;lastSoundLevel=0;firstFix=true;
+ position=null;lastGpsAt=0;accuracy=null;records={};heading=null;emergencyHeading=null;driverHeadingAt=0;emergencyHeadingAt=0;lastSoundLevel=0;firstFix=true;
  $('start').disabled=false;$('stop').disabled=true;$('mode').disabled=false;$('type').disabled=false;$('accessCode').disabled=false;
  for(const id of [...markers.keys()])clearMarker(id);
  render();setStatus('Konum paylaşımı durduruldu.');

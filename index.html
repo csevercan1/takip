@@ -23,6 +23,18 @@
 <section class="panel"><div class="heading"><strong>Canlı harita</strong><span class="pill" id="count">0 aktif acil araç</span></div><div id="map"></div><div class="actions"><button id="soundToggle" class="secondary">🔇 Sesli uyarıyı aç</button></div><div id="alerts" class="status">Konum bekleniyor.</div></section>
 <section class="panel"><strong>Aktif acil araçlar</strong><div id="vehicles" class="muted" style="margin-top:12px">Henüz araç görünmüyor.</div></section>
 <section class="panel"><div class="status warn">Yön değerlendirmesi deneysel: Yol adı eşleşmesi ve GPS doğrultusu aynı yolu veya şeridi kesin kanıtlamaz. Özellikle paralel yollarda yanlış sonuç verebilir. Kırmızı ışıkta geçme talimatı değildir.</div></section>
+<section class="panel" id="simulationPanel">
+<div class="heading"><strong>🧪 Kırmızı ışık senaryosu — Test modu</strong><span class="pill">Sanal test</span></div>
+<p class="muted">Evden çıkmadan dene. Gerçek GPS, Firebase ve canlı uyarılar bu testten etkilenmez; hiçbir sanal konum paylaşılmaz.</p>
+<div class="controls">
+<div><label for="simSituation">Ambulansın konumu</label><select id="simSituation"><option value="behind">Aynı yolda, geride</option><option value="ahead">Aynı yolda, önde</option><option value="parallel">Paralel sokakta, geride</option><option value="unknown">Yol / yön doğrulanamadı</option></select></div>
+<div><label for="simMotion">Trafik durumu</label><select id="simMotion"><option value="stopped">İki araç da kırmızı ışıkta duruyor</option><option value="moving">Ambulans hareket ediyor</option></select></div>
+</div>
+<label for="simDistance" style="margin-top:14px">Ambulans mesafesi: <strong id="simDistanceLabel">250 metre</strong></label>
+<input id="simDistance" type="range" min="20" max="600" step="10" value="250" style="padding:0;accent-color:#2865c4">
+<div id="simOutput" class="status warn" aria-live="polite"></div>
+<p class="muted" style="margin-bottom:0">Bu, kuralları deneyen bir senaryo simülasyonudur; gerçek yol eşleştirmesinin veya GPS yön doğruluğunun kanıtı değildir. Kırmızı ışıkta geçme talimatı verilmez.</p>
+</section>
 <section class="panel"><strong>GPS test bilgileri</strong><pre class="debug" id="debug">Henüz bağlantı yok.</pre></section>
 </main>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -260,6 +272,29 @@ $('stop').addEventListener('click',()=>void stop());
 document.addEventListener('visibilitychange',()=>{if(!document.hidden&&started){map.invalidateSize();refreshGps();}});
 window.addEventListener('pageshow',()=>{if(started){startWatch();refreshGps();}});
 // GPS erişimi ekran kapalıyken tarayıcı tarafından durdurulabilir; web sürümü arka planda sürekli çalışmayı garanti etmez.
+
+// Tamamen yerel simülasyon: Firebase'e yazmaz, canlı GPS/uyarı durumunu değiştirmez.
+function renderSimulation(){
+ const meters=Number($('simDistance').value);
+ const situation=$('simSituation').value;
+ const stopped=$('simMotion').value==='stopped';
+ $('simDistanceLabel').textContent=meters+' metre';
+ const out=$('simOutput');
+ if(situation==='behind'&&meters<=500){
+  out.className=meters<=100?'status danger':'status warn';
+  out.textContent=`🧪 SANAL UYARI: ${meters} metre gerinizde ambulans var. ${stopped?'Ambulans da kırmızı ışık kuyruğunda bekliyor. ':'Ambulans hareket ediyor. '}Güvenli şekilde yol vermeye hazırlanın.`;
+ }else if(situation==='behind'){
+  out.className='status good';out.textContent=`🧪 SANAL: Ambulans ${meters} metre geride; 500 metre uyarı alanının dışında.`;
+ }else if(situation==='ahead'){
+  out.className='status warn';out.textContent=`🧪 SANAL: Ambulans ${meters} metre önde. Arkadan yaklaşma uyarısı verilmez.`;
+ }else if(situation==='parallel'){
+  out.className='status warn';out.textContent=`🧪 SANAL: Ambulans yaklaşık ${meters} metre uzaklıkta fakat paralel sokakta. “Gerinizde” uyarısı verilmez.`;
+ }else{
+  out.className='status warn';out.textContent=`🧪 SANAL: Ambulans yaklaşık ${meters} metre uzaklıkta; yol veya yön doğrulanamadı. “Gerinizde” uyarısı verilmez.`;
+ }
+}
+['simSituation','simMotion','simDistance'].forEach(id=>$(id).addEventListener('input',renderSimulation));
+renderSimulation();
 render();
 </script>
 </body>
